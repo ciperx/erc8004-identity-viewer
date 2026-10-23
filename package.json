@@ -1,0 +1,17 @@
+{
+  "name": "erc8004-identity-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Static ERC-8004 identity and reputation viewer for Base and Base Sepolia",
+  "exports": {
+    ".": "./viewer.js",
+    "./config": "./config.js"
+  },
+  "scripts": {
+    "test": "node --test test/viewer.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

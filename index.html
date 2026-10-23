@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERC-8004 identity viewer</title>
+<style>
+  :root { color-scheme: light dark; --fg:#111; --muted:#555; --bg:#fff; --card:#f4f4f5; --line:#d4d4d8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#f4f4f5; --muted:#a1a1aa; --bg:#09090b; --card:#18181b; --line:#3f3f46; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font:16px/1.5 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 12px; }
+  form { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+  label { font-size:.85rem; color:var(--muted); display:flex; flex-direction:column; gap:4px; flex:1 1 120px; }
+  input, select, button { font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+  button { cursor:pointer; background:var(--card); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+  .k { color:var(--muted); font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; }
+  .v { overflow-wrap:anywhere; }
+  img.reg { max-width:100%; border-radius:8px; }
+  ul { padding-left:18px; }
+  @media (max-width: 400px) { body { padding:12px; } h1 { font-size:1.2rem; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>ERC-8004 identity viewer</h1>
+  <form id="f">
+    <label>Agent id <input id="agentId" name="agentId" inputmode="numeric" value="1" required></label>
+    <label>Network
+      <select id="network" name="network">
+        <option value="base">Base</option>
+        <option value="base-sepolia">Base Sepolia</option>
+      </select>
+    </label>
+    <label>&nbsp;<button type="submit">Read agent</button></label>
+  </form>
+  <p id="status" class="k">idle</p>
+  <section id="identity" hidden>
+    <div class="k">Owner</div><div class="v" id="owner"></div>
+    <div class="k">tokenURI</div><div class="v" id="tokenURI"></div>
+    <div class="k">Registration</div><div id="registration" class="v"></div>
+  </section>
+  <section id="reputation" hidden>
+    <div class="k">Reputation</div><div id="feedback" class="v"></div>
+  </section>
+</main>
+<script type="module">
+import { loadAgent } from './viewer.js';
+import { REGISTRIES, RPCS } from './config.js';
+
+const $ = (id) => document.getElementById(id);
+
+async function rpc(method, params) {
+  const url = RPCS[$('network').value];
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  const body = await res.json();
+  if (body.error) {
+    const err = new Error(body.error.message || 'rpc error');
+    err.code = body.error.code;
+    err.data = body.error.data;
+    throw err;
+  }
+  return body.result;
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+$('f').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const network = $('network').value;
+  const reg = REGISTRIES[network];
+  $('status').textContent = 'reading...';
+  $('identity').hidden = true;
+  $('reputation').hidden = true;
+  const out = await loadAgent({
+    agentId: $('agentId').value.trim(),
+    network,
+    identityRegistry: reg.identity,
+    reputationRegistry: reg.reputation,
+    rpc,
+    fetchJson,
+  });
+  $('status').textContent = out.status + (out.error ? ': ' + out.error : '');
+  if (out.status !== 'ok') return;
+  $('identity').hidden = false;
+  $('owner').textContent = out.owner;
+  $('tokenURI').textContent = out.tokenURI;
+  const r = out.registration || {};
+  const parts = [];
+  if (r.name) parts.push('<strong>' + escapeHtml(r.name) + '</strong>');
+  if (r.description) parts.push('<p>' + escapeHtml(r.description) + '</p>');
+  if (r.image) parts.push('<img class="reg" alt="registration image" src="' + escapeHtml(r.image) + '">');
+  const eps = r.endpoints || r.services;
+  if (eps) parts.push('<div class="k">Endpoints</div><pre>' + escapeHtml(JSON.stringify(eps, null, 2)) + '</pre>');
+  if (r.supportedTrust) parts.push('<div class="k">Supported trust</div><div>' + escapeHtml(JSON.stringify(r.supportedTrust)) + '</div>');
+  $('registration').innerHTML = parts.join('') || '<em>no fields</em>';
+  $('reputation').hidden = false;
+  const fb = out.feedback || { count: 0, items: [] };
+  if (!fb.count) {
+    $('feedback').textContent = 'no feedback yet';
+  } else {
+    const rows = fb.items.map((it) => '<li>' + escapeHtml(String(it.score)) + ' from ' + escapeHtml(String(it.client)) + '</li>');
+    $('feedback').innerHTML = '<div>count ' + fb.count + ', average ' + (fb.average === null ? 'n/a' : fb.average.toFixed(2)) + '</div><ul>' + rows.join('') + '</ul>';
+  }
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+</body>
+</html>
