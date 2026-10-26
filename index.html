@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERC-8004 identity viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #11151c;
+    --muted: #5b6676;
+    --line: #e2e6ee;
+    --card: #f7f9fc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f16;
+      --fg: #e8edf6;
+      --muted: #93a0b4;
+      --line: #1e2735;
+      --card: #111823;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  form { display: grid; gap: 10px; margin-bottom: 22px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 4px; }
+  input, select, button {
+    width: 100%; font: inherit; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  }
+  button { background: #0a9bff; color: #fff; border: 0; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  section { border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 0 0 10px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
+  dt { color: var(--muted); font-size: 14px; }
+  dd { margin: 0; word-break: break-all; font-size: 14px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  img { max-width: 96px; border-radius: 8px; display: block; margin-bottom: 10px; }
+  .state { padding: 14px; border-radius: 10px; font-weight: 600; margin-bottom: 14px; }
+  .ok { background: #0d3a22; color: #8df3b0; }
+  .empty { background: #3a3410; color: #f5d76e; }
+  .error { background: #3d1418; color: #ff9aa4; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ERC-8004 identity viewer</h1>
+  <p class="sub">Reads an agent's owner and registration file from the identity registry, and its
+  reputation feedback, straight from Base or Base Sepolia. No backend, reads only.</p>
+
+  <form id="form">
+    <div class="row">
+      <div>
+        <label for="agentId">Agent id</label>
+        <input id="agentId" inputmode="numeric" placeholder="e.g. 1" required>
+      </div>
+      <div>
+        <label for="network">Network</label>
+        <select id="network">
+          <option value="base">Base mainnet</option>
+          <option value="base-sepolia">Base Sepolia</option>
+        </select>
+      </div>
+    </div>
+    <button id="run" type="submit">Read agent</button>
+    <p class="hint">Nothing is signed or written. One eth_call for the owner, one for the tokenURI,
+    then the registration file and the reputation summary.</p>
+  </form>
+
+  <div id="state"></div>
+  <div id="out"></div>
+</main>
+
+<script type="module">
+import { loadAgent } from './viewer.js';
+import { REGISTRIES } from './config.js';
+
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function rpcFor(url) {
+  return async (method, params) => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    if (!response.ok) throw new Error('rpc HTTP ' + response.status);
+    const body = await response.json();
+    if (body.error) {
+      const error = new Error(body.error.message || 'rpc error');
+      error.code = body.error.code;
+      throw error;
+    }
+    return body.result;
+  };
+}
+
+const fetchJson = async (url) => {
+  const response = await fetch(url, { headers: { accept: 'application/json, text/plain, */*' } });
+  if (!response.ok) throw new Error('file HTTP ' + response.status);
+  const text = await response.text();
+  try { return JSON.parse(text); } catch { return text; }
+};
+
+function render(out) {
+  const state = $('state');
+  const box = $('out');
+  if (out.status === 'empty') {
+    state.className = 'state empty';
+    state.textContent = 'No such agent on this network: the registry has no owner for id ' + out.agentId + '.';
+    box.innerHTML = '';
+    return;
+  }
+  if (out.status === 'error') {
+    state.className = 'state error';
+    state.textContent = 'Could not read this agent: ' + (out.error || 'unknown error');
+    box.innerHTML = '';
+    return;
+  }
+  state.className = 'state ok';
+  state.textContent = 'Agent ' + out.agentId + ' on ' + $('network').value;
+
+  const reg = out.registration || {};
+  const endpoints = Array.isArray(reg.endpoints) ? reg.endpoints : [];
+  const trust = Array.isArray(reg.supportedTrust) ? reg.supportedTrust : (reg.supported_trust || []);
+  const feedback = out.feedback;
+  const items = feedback && Array.isArray(feedback.items) ? feedback.items : [];
+
+  box.innerHTML = `
+    <section>
+      <h2>Identity</h2>
+      ${reg.image ? `<img src="${esc(reg.image)}" alt="">` : ''}
+      <dl>
+        <dt>Owner</dt><dd><code>${esc(out.owner)}</code></dd>
+        <dt>tokenURI</dt><dd><code>${esc(out.tokenURI)}</code></dd>
+        <dt>Name</dt><dd>${esc(reg.name || 'not stated')}</dd>
+        <dt>Description</dt><dd>${esc(reg.description || 'not stated')}</dd>
+        <dt>Trust</dt><dd>${trust.length ? trust.map(esc).join(', ') : 'not stated'}</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Endpoints</h2>
+      ${endpoints.length
+        ? `<dl>${endpoints.map((e) => `<dt>${esc(e.name || 'endpoint')}</dt><dd><code>${esc(e.url || e.endpoint || '')}</code></dd>`).join('')}</dl>`
+        : '<p class="hint">The registration file lists no endpoints.</p>'}
+    </section>
+    <section>
+      <h2>Reputation</h2>
+      ${feedback
+        ? (feedback.count > 0
+            ? `<dl><dt>Feedback</dt><dd>${feedback.count}</dd><dt>Average</dt><dd>${Number(feedback.average).toFixed(2)}</dd></dl>
+               ${items.length ? `<table><thead><tr><th>Client</th><th>Score</th></tr></thead><tbody>
+                 ${items.slice(0, 20).map((i) => `<tr><td><code>${esc(i.client)}</code></td><td>${esc(i.score)}</td></tr>`).join('')}
+               </tbody></table>` : '<p class="hint">Feedback entries could not be listed; the summary above is from the registry.</p>'}`
+            : '<p class="hint">No feedback yet for this agent.</p>')
+        : '<p class="hint">No reputation registry was read.</p>'}
+    </section>`;
+}
+
+$('form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = $('run');
+  button.disabled = true;
+  button.textContent = 'Reading...';
+  try {
+    const network = $('network').value;
+    const out = await loadAgent({
+      agentId: $('agentId').value.trim(),
+      network,
+      rpc: rpcFor(REGISTRIES[network].rpc),
+      fetchJson,
+      registries: REGISTRIES,
+    });
+    render(out);
+  } catch (error) {
+    $('state').className = 'state error';
+    $('state').textContent = 'Unexpected failure: ' + (error && error.message ? error.message : error);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Read agent';
+  }
+});
+</script>
+</body>
+</html>
